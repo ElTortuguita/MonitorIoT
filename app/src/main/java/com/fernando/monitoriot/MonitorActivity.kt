@@ -1,7 +1,12 @@
 package com.fernando.monitoriot
 
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.Ringtone
+import android.media.RingtoneManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -19,9 +24,16 @@ class MonitorActivity : AppCompatActivity() {
 
     private lateinit var tvConexion: TextView
     private lateinit var tvTemperatura: TextView
+    private lateinit var tvHumedad: TextView
     private lateinit var tvEstado: TextView
     private lateinit var clienteMqtt: MqttAsyncClient
     private lateinit var baseDatos: DatabaseHelper
+
+    private var sonidoAlerta: Ringtone? = null
+    private val manejador = Handler(Looper.getMainLooper())
+
+    private var ultimaHumedad: Double? = null
+    private var alertaActiva = false
 
     private val servidorMqtt =
         "ssl://broker.hivemq.com:8883"
@@ -29,14 +41,20 @@ class MonitorActivity : AppCompatActivity() {
     private val temaTemperatura =
         "fernando-ti3042-2026/temperatura"
 
+    private val temaHumedad =
+        "fernando-ti3042-2026/humedad"
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_monitor)
 
         baseDatos = DatabaseHelper(this)
 
+        prepararSonidoAlerta()
+
         tvConexion = findViewById(R.id.tvConexion)
         tvTemperatura = findViewById(R.id.tvTemperatura)
+        tvHumedad = findViewById(R.id.tvHumedad)
         tvEstado = findViewById(R.id.tvEstado)
 
         val btnHistorial =
@@ -57,6 +75,35 @@ class MonitorActivity : AppCompatActivity() {
         }
 
         conectarMqtt()
+    }
+
+    private fun prepararSonidoAlerta() {
+        var uriAlarma =
+            RingtoneManager.getDefaultUri(
+                RingtoneManager.TYPE_ALARM
+            )
+
+        if (uriAlarma == null) {
+            uriAlarma =
+                RingtoneManager.getDefaultUri(
+                    RingtoneManager.TYPE_NOTIFICATION
+                )
+        }
+
+        sonidoAlerta =
+            RingtoneManager.getRingtone(
+                applicationContext,
+                uriAlarma
+            )
+
+        val atributos = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ALARM)
+            .setContentType(
+                AudioAttributes.CONTENT_TYPE_SONIFICATION
+            )
+            .build()
+
+        sonidoAlerta?.audioAttributes = atributos
     }
 
     private fun conectarMqtt() {
@@ -81,6 +128,7 @@ class MonitorActivity : AppCompatActivity() {
             override fun connectionLost(cause: Throwable?) {
                 runOnUiThread {
                     tvConexion.text = "● Conexión perdida"
+
                     tvConexion.setTextColor(
                         getColor(android.R.color.holo_red_dark)
                     )
@@ -94,13 +142,30 @@ class MonitorActivity : AppCompatActivity() {
                 val mensaje =
                     message?.toString()?.trim() ?: return
 
-                val temperatura =
+                val valor =
                     mensaje.toDoubleOrNull() ?: return
 
-                baseDatos.guardarMedicion(temperatura)
+                if (topic == temaHumedad) {
+                    ultimaHumedad = valor
 
-                runOnUiThread {
-                    actualizarPantalla(temperatura)
+                    runOnUiThread {
+                        tvHumedad.text =
+                            String.format(
+                                "Humedad: %.1f %%",
+                                valor
+                            )
+                    }
+                }
+
+                if (topic == temaTemperatura) {
+                    baseDatos.guardarMedicion(
+                        valor,
+                        ultimaHumedad
+                    )
+
+                    runOnUiThread {
+                        actualizarTemperatura(valor)
+                    }
                 }
             }
 
@@ -121,6 +186,11 @@ class MonitorActivity : AppCompatActivity() {
                 override fun onSuccess(
                     asyncActionToken: IMqttToken?
                 ) {
+                    clienteMqtt.subscribe(
+                        temaHumedad,
+                        0
+                    )
+
                     clienteMqtt.subscribe(
                         temaTemperatura,
                         0
@@ -157,7 +227,7 @@ class MonitorActivity : AppCompatActivity() {
         )
     }
 
-    private fun actualizarPantalla(
+    private fun actualizarTemperatura(
         temperatura: Double
     ) {
         tvTemperatura.text =
@@ -174,6 +244,11 @@ class MonitorActivity : AppCompatActivity() {
             tvEstado.setBackgroundColor(
                 getColor(android.R.color.holo_red_light)
             )
+
+            if (!alertaActiva) {
+                reproducirAlarma()
+                alertaActiva = true
+            }
         } else {
             tvEstado.text =
                 "Estado: temperatura normal"
@@ -185,10 +260,31 @@ class MonitorActivity : AppCompatActivity() {
             tvEstado.setBackgroundColor(
                 getColor(android.R.color.holo_green_light)
             )
+
+            alertaActiva = false
         }
     }
 
+    private fun reproducirAlarma() {
+        sonidoAlerta?.play()
+
+        manejador.postDelayed(
+            {
+                if (sonidoAlerta?.isPlaying == true) {
+                    sonidoAlerta?.stop()
+                }
+            },
+            3000
+        )
+    }
+
     override fun onDestroy() {
+        manejador.removeCallbacksAndMessages(null)
+
+        if (sonidoAlerta?.isPlaying == true) {
+            sonidoAlerta?.stop()
+        }
+
         if (::clienteMqtt.isInitialized &&
             clienteMqtt.isConnected
         ) {
